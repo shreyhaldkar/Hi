@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<title>Face Auto Rig (Final)</title>
+<style>
+body{margin:0;background:#070d14;color:#eee;font-family:system-ui,Arial}
+header{padding:10px;text-align:center;background:#0b1624}
+header h1{margin:0;font-size:18px;color:#ffb86b}
+.controls{display:flex;flex-wrap:wrap;gap:8px;padding:8px;background:#0e1826;justify-content:center}
+button,input,select{padding:10px;border:0;border-radius:8px;background:#182235;color:#fff;font-size:14px}
+canvas{display:block;width:100%;height:100%;touch-action:none}
+#status{font-size:13px;color:#9ab;text-align:center;padding:5px}
+</style>
+</head>
+<body>
+<header><h1>Mobile Face Auto-Rig (Final)</h1></header>
+
+<div class="controls">
+  <input type="file" id="fileInput" accept=".glb">
+  <select id="landmarkSelect"></select>
+  <button id="clearBtn">Clear</button>
+  <button id="createRigBtn">Create Rig</button>
+  <button id="exportBtn">Export GLB</button>
+</div>
+
+<div id="status">Load a .glb model, tap to place landmarks, then create rig.</div>
+<canvas id="canvas"></canvas>
+
+<!-- 🧱 Scripts in same folder -->
+<script src="three.min.js"></script>
+<script src="gltfloader.js"></script>
+<script src="gltfexporter.js"></script>
+
+<script>
+(function(){
+// ✅ Landmark list
+const landmarkTypes=['LeftEye','RightEye','NoseTip','UpperLip','LowerLip','LeftEar','RightEar','Chin'];
+const fileInput=document.getElementById('fileInput');
+const sel=document.getElementById('landmarkSelect');
+const clearBtn=document.getElementById('clearBtn');
+const rigBtn=document.getElementById('createRigBtn');
+const exportBtn=document.getElementById('exportBtn');
+const status=document.getElementById('status');
+landmarkTypes.forEach(t=>{let o=document.createElement('option');o.value=t;o.textContent=t;sel.appendChild(o);});
+
+let scene,camera,renderer;
+let activeMesh=null,uploadedRoot=null;
+let markers=[];
+const raycaster=new THREE.Raycaster(),pointer=new THREE.Vector2();
+
+init();
+animate();
+
+// ✅ Setup
+function init(){
+  renderer=new THREE.WebGLRenderer({canvas:document.getElementById('canvas'),antialias:true});
+  renderer.setPixelRatio(window.devicePixelRatio);
+  resize();window.addEventListener('resize',resize);
+
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x070d14);
+  camera=new THREE.PerspectiveCamera(45,window.innerWidth/window.innerHeight,0.01,100);
+  camera.position.set(0,0.8,1.6);
+  const light=new THREE.DirectionalLight(0xffffff,1);
+  light.position.set(1,2,2);
+  scene.add(light,new THREE.AmbientLight(0x555555));
+
+  const grid=new THREE.GridHelper(2,10,0x222222,0x111111);
+  grid.position.y=-0.6;
+  scene.add(grid);
+
+  renderer.domElement.addEventListener('pointerdown',e=>placeMarker(e.clientX,e.clientY));
+}
+
+function resize(){
+  const w=window.innerWidth,h=window.innerHeight-180;
+  renderer.setSize(w,h);
+  camera.aspect=w/h;camera.updateProjectionMatrix();
+}
+
+// ✅ Place landmarks
+function placeMarker(x,y){
+  if(!activeMesh)return;
+  const rect=renderer.domElement.getBoundingClientRect();
+  pointer.x=(x-rect.left)/rect.width*2-1;
+  pointer.y=-(y-rect.top)/rect.height*2+1;
+  raycaster.setFromCamera(pointer,camera);
+  const hits=raycaster.intersectObject(activeMesh);
+  if(!hits.length)return;
+  const p=hits[0].point.clone();
+  const mark=new THREE.Mesh(new THREE.SphereGeometry(0.01,10,8),new THREE.MeshBasicMaterial({color:0xffb86b}));
+  mark.position.copy(p);
+  scene.add(mark);
+  markers.push({type:sel.value,marker:mark});
+  status.textContent=`${markers.length} landmarks placed`;
+}
+
+// ✅ Load GLB file
+fileInput.addEventListener('change',ev=>{
+  const f=ev.target.files[0];
+  if(!f)return;
+  const url=URL.createObjectURL(f);
+  const loader=new GLTFLoader();
+  loader.load(url,gltf=>{
+    if(uploadedRoot)scene.remove(uploadedRoot);
+    uploadedRoot=gltf.scene;
+    scene.add(uploadedRoot);
+    uploadedRoot.traverse(n=>{if(n.isMesh&&!activeMesh)activeMesh=n;});
+    status.textContent='Model loaded. Tap to place landmarks.';
+    URL.revokeObjectURL(url);
+  },undefined,err=>{
+    console.error(err);
+    status.textContent='Error loading model';
+  });
+});
+
+// ✅ Clear landmarks
+clearBtn.onclick=()=>{
+  markers.forEach(m=>scene.remove(m.marker));
+  markers=[];status.textContent='Landmarks cleared';
+};
+
+// ✅ Create rig
+rigBtn.onclick=()=>{
+  if(!activeMesh){alert('Load model first');return;}
+  if(!markers.length){alert('Add landmarks first');return;}
+  try{
+    const geom=activeMesh.geometry.clone();
+    const root=new THREE.Bone();root.name='root';
+    const head=new THREE.Bone();head.name='head';root.add(head);
+    const bones=[root,head];
+    for(const lm of markers){
+      const pos=lm.marker.position.clone();
+      const local=activeMesh.worldToLocal(pos);
+      const b=new THREE.Bone();b.name='b_'+lm.type;b.position.copy(local);
+      head.add(b);bones.push(b);
+    }
+    const skeleton=new THREE.Skeleton(bones);
+    const mat=activeMesh.material.clone();
+    const skin=new THREE.SkinnedMesh(geom,mat);
+    skin.add(root);skin.bind(skeleton);
+    activeMesh.visible=false;
+    scene.add(skin);
+    status.textContent='Rig created! Now export.';
+    window.skin=skin;
+  }catch(e){console.error(e);alert('Rig failed');}
+};
+
+// ✅ Export rigged GLB
+exportBtn.onclick=()=>{
+  if(!window.skin){alert('Create rig first');return;}
+  const exp=new THREE.GLTFExporter();
+  exp.parse(window.skin,gltf=>{
+    const blob=new Blob([gltf],{type:'model/gltf-binary'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download='rigged.glb';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    status.textContent='Exported rigged.glb';
+  },{binary:true});
+};
+
+// ✅ Animate
+function animate(){
+  requestAnimationFrame(animate);
+  renderer.render(scene,camera);
+}
+})();
+</script>
+</body>
+</html>
